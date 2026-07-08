@@ -1,0 +1,82 @@
+name: Develop GitHub Issue (Self-Hosted Coding Agent)
+
+on:
+  workflow_dispatch:
+    inputs:
+      repo:
+        description: "Target repository, as owner/name (must be one you have write access to)"
+        required: true
+        type: string
+      issue_number:
+        description: "Issue number in the target repository to resolve"
+        required: true
+        type: string
+      draft_pr:
+        description: "Open the pull request as a draft"
+        required: false
+        type: boolean
+        default: true
+      max_iterations:
+        description: "Max agent tool-call iterations before giving up"
+        required: false
+        type: string
+        default: "40"
+
+env:
+  MODEL_REPO: bartowski/Qwen2.5-Coder-7B-Instruct-GGUF
+  MODEL_FILE: Qwen2.5-Coder-7B-Instruct-Q4_K_M.gguf
+  MODEL_PATH: models/Qwen2.5-Coder-7B-Instruct-Q4_K_M.gguf
+
+jobs:
+  develop:
+    runs-on: ubuntu-latest
+    # Comfortably under the 6h hard limit for GitHub-hosted runners, leaving
+    # room for setup/model download/git steps around the agent's own time
+    # budget (AGENT_TIME_BUDGET_SECONDS below).
+    timeout-minutes: 350
+    steps:
+      - name: Checkout agent scripts
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          pip install requests
+          pip install llama-cpp-python --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cpu
+
+      - name: Cache LLM model weights
+        id: cache-model
+        uses: actions/cache@v4
+        with:
+          path: models
+          key: model-${{ env.MODEL_FILE }}
+
+      - name: Download model weights
+        if: steps.cache-model.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p models
+          MODEL_URL="https://huggingface.co/${MODEL_REPO}/resolve/main/${MODEL_FILE}"
+          echo "Downloading ${MODEL_URL}"
+          if ! curl -sSL -f -o "${MODEL_PATH}" "${MODEL_URL}"; then
+            echo "ERROR: failed to download model from ${MODEL_URL}"
+            echo "Check that MODEL_REPO/MODEL_FILE point to a real, non-split file at:"
+            echo "https://huggingface.co/${MODEL_REPO}/tree/main"
+            exit 1
+          fi
+
+      - name: Run coding agent (local LLM, no external API calls)
+        env:
+          TARGET_REPO: ${{ inputs.repo }}
+          ISSUE_NUMBER: ${{ inputs.issue_number }}
+          DRAFT_PR: ${{ inputs.draft_pr }}
+          MAX_ITERATIONS: ${{ inputs.max_iterations }}
+          AGENT_TIME_BUDGET_SECONDS: "14400"
+          GH_TOKEN: ${{ secrets.DEV_AGENT_PAT }}
+          MODEL_PATH: ${{ env.MODEL_PATH }}
+        run: |
+          cd scripts
+          python develop_issue.py

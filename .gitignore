@@ -1,0 +1,6 @@
+models/*.gguf
+__pycache__/
+*.pyc
+.workdir/
+target-repo/
+*.log
