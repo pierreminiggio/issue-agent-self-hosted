@@ -16,7 +16,7 @@ Optional:
   AGENT_TIME_BUDGET_SECONDS  default 14400 (4h) — leaves headroom under the
                               GitHub Actions 6h job limit for setup/model
                               download/git operations either side of the loop
-  LLM_N_CTX                  default 16384
+  LLM_N_CTX                  default 24576
 """
 from __future__ import annotations
 
@@ -65,7 +65,7 @@ def main():
     draft_pr = env("DRAFT_PR", "true").lower() != "false"
     max_iterations = int(env("MAX_ITERATIONS", "40"))
     time_budget = int(env("AGENT_TIME_BUDGET_SECONDS", str(4 * 3600)))
-    n_ctx = int(env("LLM_N_CTX", "16384"))
+    n_ctx = int(env("LLM_N_CTX", "24576"))
 
     owner, repo = target_repo.split("/", 1)
 

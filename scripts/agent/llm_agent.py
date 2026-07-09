@@ -124,7 +124,14 @@ class AgentLoop:
             if act == "write_file":
                 path = action.get("path", "")
                 result = self.tools.write_file(path, action.get("content", ""))
-                self.modified_files.add(path)
+                if not result.startswith("ERROR"):
+                    self.modified_files.add(path)
+                return result
+            if act == "edit_file":
+                path = action.get("path", "")
+                result = self.tools.edit_file(path, action.get("old_str", ""), action.get("new_str", ""))
+                if not result.startswith("ERROR"):
+                    self.modified_files.add(path)
                 return result
             if act == "run_tests":
                 self.tests_ever_run = True

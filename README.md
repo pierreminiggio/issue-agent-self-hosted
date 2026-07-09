@@ -140,10 +140,12 @@ anything about the agent logic — only:
 
 ## Known limitations
 
-- Single-file-at-a-time edits: `write_file` always takes the full new file
-  content, there's no diff/patch application. This is simpler and more
-  reliable for a 7B model than getting it to produce valid unified diffs,
-  at the cost of using more tokens per edit on large files.
+- Edits to existing files are anchored, surgical replacements (`edit_file`: find an exact
+  unique snippet, replace it), not full-file rewrites. `write_file` only ever creates brand-new
+  files and refuses to touch an existing one. This is deliberate: a full-file rewrite requires
+  the model to faithfully reproduce every untouched line from memory, and on a large file over
+  a long session that can silently drop content — anchored edits make it structurally
+  impossible for an edit to touch anything outside the snippet it explicitly quoted.
 - No dependency installation beyond a best-effort `pip install -r
   requirements.txt` / `npm ci` before running tests; projects with more
   involved setup (databases, docker-compose, etc.) will likely show test

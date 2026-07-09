@@ -30,18 +30,28 @@ ACTION_SCHEMA = {
                 "read_file",
                 "search_code",
                 "write_file",
+                "edit_file",
                 "run_tests",
                 "finish",
             ],
         },
         "path": {
             "type": "string",
-            "description": "Repo-relative file path. Used by read_file and write_file.",
+            "description": "Repo-relative file path. Used by read_file, write_file, and edit_file.",
         },
         "content": {
             "type": "string",
-            "description": "Full new contents of the file. Used by write_file only. "
-            "Always the COMPLETE file content, not a diff/patch fragment.",
+            "description": "Full contents of a brand-new file. Used by write_file only, "
+            "which can only create files that don't already exist.",
+        },
+        "old_str": {
+            "type": "string",
+            "description": "Exact, unique, contiguous snippet to find in the existing file. "
+            "Used by edit_file only.",
+        },
+        "new_str": {
+            "type": "string",
+            "description": "Text to replace old_str with. Used by edit_file only.",
         },
         "pattern": {
             "type": "string",
@@ -78,9 +88,18 @@ a different part of a large file, note that in your next thought.
 - search_code: search the whole repo for a literal string or regex given in "query". Returns \
 matching file paths with line numbers and a snippet of context. Use this to find where \
 something is defined or used before editing it.
-- write_file: overwrite the file at "path" with the COMPLETE new file "content". There is no \
-patch/diff mechanism — always provide the entire intended file content, not just the changed \
-lines. If the file doesn't exist yet, it will be created (including parent directories).
+- write_file: create a BRAND-NEW file at "path" with the complete "content". This only works if \
+the file does not already exist — it will refuse to overwrite an existing file. To modify a \
+file that already exists, use edit_file instead.
+- edit_file: modify an EXISTING file by replacing one exact snippet with another. Give "path", \
+"old_str" (the exact text currently in the file that you want to change — copy it precisely, \
+whitespace and indentation included, from a prior read_file or search_code result) and \
+"new_str" (what it should become). old_str must match exactly once in the file; if the same \
+text appears more than once, include more surrounding lines so it's unique. This changes only \
+the quoted snippet — every other line in the file is left exactly as it was. NEVER try to \
+reconstruct or retype an entire existing file from memory; always use edit_file for changes to \
+existing files, even for a large file, even if you only saw part of it — you don't need to \
+remember the rest of the file to safely edit one part of it.
 - run_tests: runs this project's test suite (already auto-detected for you; you don't choose \
 the command). Returns pass/fail and a tail of the output. Use this after making changes to \
 check your work. If no test runner could be detected, this will tell you so — in that case, \

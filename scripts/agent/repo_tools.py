@@ -89,10 +89,66 @@ class RepoTools:
         return text
 
     def write_file(self, path: str, content: str) -> str:
+        """Creates a brand-new file. Refuses to touch an existing one — see
+        edit_file for modifying existing files. This split exists because a
+        full-overwrite on an existing file requires the model to faithfully
+        reproduce every untouched line from memory; on a large file over a
+        long session that reproduction can silently drop content, destroying
+        the rest of the file with no signal that anything went wrong. Making
+        write_file create-only removes that failure mode structurally rather
+        than relying on the model to be careful.
+        """
         target = self._resolve(path)
+        if target.exists():
+            return (
+                f"ERROR: {path} already exists. write_file only creates NEW files. "
+                "To modify an existing file, use edit_file with old_str/new_str instead."
+            )
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(content if content is not None else "", encoding="utf-8")
-        return f"Wrote {len(content or '')} chars to {path}"
+        return f"Created {path} ({len(content or '')} chars)"
+
+    def edit_file(self, path: str, old_str: str, new_str: str) -> str:
+        """Replaces exactly one occurrence of old_str with new_str in an
+        existing file. old_str must match the current file content exactly
+        (including whitespace) and must be unique in the file — this is what
+        guarantees the edit only ever touches the span the model explicitly
+        quoted, leaving everything else in the file byte-for-byte untouched,
+        regardless of whether the model still "remembers" the rest of the
+        file accurately.
+        """
+        target = self._resolve(path)
+        if not target.exists():
+            return f"ERROR: file not found: {path}. Use write_file to create a new file."
+        if target.is_dir():
+            return f"ERROR: {path} is a directory, not a file."
+        try:
+            text = target.read_text(encoding="utf-8", errors="replace")
+        except Exception as e:
+            return f"ERROR: could not read {path}: {e}"
+
+        if not old_str:
+            return "ERROR: old_str must not be empty."
+        count = text.count(old_str)
+        if count == 0:
+            return (
+                f"ERROR: old_str was not found in {path}. It must match the file's current "
+                "content exactly, including whitespace/indentation. Use read_file or "
+                "search_code to copy the exact snippet before retrying."
+            )
+        if count > 1:
+            return (
+                f"ERROR: old_str appears {count} times in {path}, but it must uniquely "
+                "identify a single location. Include more surrounding lines of context in "
+                "old_str so it matches only the one place you intend to change."
+            )
+
+        new_text = text.replace(old_str, new_str, 1)
+        target.write_text(new_text, encoding="utf-8")
+        return (
+            f"Edited {path}: replaced 1 occurrence. File is now {len(new_text)} chars, "
+            f"{len(new_text.splitlines())} lines."
+        )
 
     def search_code(self, query: str) -> str:
         if not query:
