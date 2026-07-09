@@ -19,17 +19,37 @@ TAIL_CHARS = 4000
 
 
 def detect_test_command(root: str):
-    """Returns (install_cmds: list[list[str]], test_cmd: list[str], description: str) or None."""
+    """Returns (install_cmds: list[list[str]], test_cmd: list[str], description: str) or None.
+
+    Checked in an order that puts unambiguous, language-specific config files
+    first (composer.json, package.json, go.mod, Cargo.toml) and only falls
+    back to Python/pytest if there's actual Python evidence — not just a
+    folder happening to be named "tests", which plenty of non-Python
+    projects (e.g. PHPUnit, Jest) also use. Matching on that folder name
+    alone previously caused false positives on PHP/JS repos.
+    """
     root = Path(root)
 
-    if (root / "pytest.ini").exists() or (root / "pyproject.toml").exists() or (root / "tests").is_dir():
-        install = []
-        if (root / "requirements.txt").exists():
-            install.append(["pip", "install", "-q", "-r", "requirements.txt"])
-        if (root / "requirements-dev.txt").exists():
-            install.append(["pip", "install", "-q", "-r", "requirements-dev.txt"])
-        return install, ["python", "-m", "pytest", "-q"], "pytest"
+    # PHP (composer-based projects)
+    if (root / "composer.json").exists():
+        install = [["composer", "install", "--no-interaction", "--prefer-dist"]] if shutil.which("composer") else []
+        has_test_script = False
+        try:
+            import json as _json
+            data = _json.loads((root / "composer.json").read_text(encoding="utf-8"))
+            has_test_script = "test" in (data.get("scripts") or {})
+        except (OSError, ValueError):
+            pass
+        if has_test_script:
+            return install, ["composer", "test"], "composer test"
+        if (root / "phpunit.xml").exists() or (root / "phpunit.xml.dist").exists():
+            # vendor/bin/phpunit won't exist until `composer install` runs (it's
+            # normally gitignored), so we rely on the checked-in phpunit config
+            # as the signal, not the binary's presence at detection time.
+            phpunit_bin = root / "vendor" / "bin" / "phpunit"
+            return install, ["php", str(phpunit_bin)], "phpunit"
 
+    # Node / JS
     if (root / "package.json").exists():
         install = [["npm", "ci", "--silent"]] if (root / "package-lock.json").exists() else [["npm", "install", "--silent"]]
         return install, ["npm", "test", "--silent"], "npm test"
@@ -47,6 +67,24 @@ def detect_test_command(root: str):
             makefile_text = ""
         if "\ntest:" in ("\n" + makefile_text):
             return [], ["make", "test"], "make test"
+
+    # Python: require actual Python evidence, not just a "tests" folder name,
+    # since that name is also common in PHP/JS/Go projects.
+    has_python_evidence = (
+        (root / "pyproject.toml").exists()
+        or (root / "setup.py").exists()
+        or (root / "setup.cfg").exists()
+        or (root / "requirements.txt").exists()
+        or (root / "pytest.ini").exists()
+        or any(root.glob("*.py"))
+    )
+    if has_python_evidence:
+        install = [["pip", "install", "-q", "pytest"]]
+        if (root / "requirements.txt").exists():
+            install.append(["pip", "install", "-q", "-r", "requirements.txt"])
+        if (root / "requirements-dev.txt").exists():
+            install.append(["pip", "install", "-q", "-r", "requirements-dev.txt"])
+        return install, ["python", "-m", "pytest", "-q"], "pytest"
 
     return None
 
