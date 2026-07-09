@@ -35,6 +35,34 @@ class PathEscapeError(Exception):
     pass
 
 
+MAX_CONSECUTIVE_IDENTICAL_LINES = 4
+
+
+def detect_degenerate_repetition(text: str) -> str | None:
+    """Returns a short human-readable reason if `text` looks like a
+    degenerate generation loop (the same non-trivial line repeated many
+    times in a row) — a known local-model failure mode where it gets stuck
+    re-emitting one line until max_tokens cuts it off — or None otherwise.
+
+    This is a hard, structural check rather than relying solely on sampling
+    parameters (temperature/repeat_penalty) to make loops merely less
+    likely: it guarantees such output never reaches disk, the same way
+    edit_file guarantees an edit can't touch untouched lines.
+    """
+    prev = None
+    run = 0
+    for line in text.splitlines() + [None]:
+        stripped = line.strip() if line is not None else None
+        if stripped is not None and len(stripped) > 3 and stripped == prev:
+            run += 1
+        else:
+            if prev and run > MAX_CONSECUTIVE_IDENTICAL_LINES:
+                return f"the line `{prev[:80]}` repeats {run} times in a row"
+            prev = stripped
+            run = 1
+    return None
+
+
 class RepoTools:
     def __init__(self, root: str):
         self.root = Path(root).resolve()
@@ -104,6 +132,14 @@ class RepoTools:
                 f"ERROR: {path} already exists. write_file only creates NEW files. "
                 "To modify an existing file, use edit_file with old_str/new_str instead."
             )
+        reason = detect_degenerate_repetition(content or "")
+        if reason:
+            return (
+                f"ERROR: refused to write {path} — the generated content looks like a "
+                f"generation loop, not intended content: {reason}. This usually happens when "
+                "trying to write out a large repetitive block in one go. Retry with a smaller, "
+                "deliberate write, double-checking each line is actually different from the last."
+            )
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(content if content is not None else "", encoding="utf-8")
         return f"Created {path} ({len(content or '')} chars)"
@@ -141,6 +177,12 @@ class RepoTools:
                 f"ERROR: old_str appears {count} times in {path}, but it must uniquely "
                 "identify a single location. Include more surrounding lines of context in "
                 "old_str so it matches only the one place you intend to change."
+            )
+        reason = detect_degenerate_repetition(new_str or "")
+        if reason:
+            return (
+                f"ERROR: refused to edit {path} — new_str looks like a generation loop, not "
+                f"intended content: {reason}. Retry with a smaller, deliberate replacement."
             )
 
         new_text = text.replace(old_str, new_str, 1)

@@ -109,6 +109,14 @@ partial progress you can). Provide a "summary" describing what you changed and w
 a pull request description. This ends the session — you cannot take further actions after this.
 
 Rules:
+- Never assume how something is done in this codebase from general knowledge of other \
+frameworks or projects. Before using any helper function, facade, class, or pattern you \
+haven't yet confirmed exists in THIS codebase (for example: a translation/i18n helper, a \
+logging call, an error-handling convention), use search_code to find how the same kind of \
+thing is already done elsewhere in this specific project, and copy that exact convention — \
+its function name, import, and calling style — rather than a common one you recall from \
+training. If a genuinely similar case doesn't already exist anywhere in the codebase, say so \
+explicitly in your finish summary rather than inventing a plausible-looking mechanism.
 - Make the smallest change that correctly resolves the issue. Don't refactor unrelated code.
 - Do NOT modify dependency manifests, build configuration, or test-tooling setup (e.g. \
 requirements.txt, package.json, composer.json, CI config) in order to make test tooling run, \

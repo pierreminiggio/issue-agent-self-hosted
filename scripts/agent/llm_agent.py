@@ -43,6 +43,8 @@ class AgentLoop:
         self.modified_files = set()
         self.tests_ever_run = False
         self.last_test_result = None
+        self.has_explored = False
+        self.exploration_nudge_used = False
 
     def run(self, repo_full_name: str, issue: dict) -> dict:
         messages = [
@@ -83,6 +85,27 @@ class AgentLoop:
                 summary = action.get("summary") or "(agent did not provide a summary)"
                 return self._result(finished=True, summary=summary, transcript=transcript)
 
+            if act in ("read_file", "search_code", "list_files"):
+                self.has_explored = True
+
+            if act in ("write_file", "edit_file") and not self.has_explored and not self.exploration_nudge_used:
+                # One-time nudge, not a hard block: catches the common pattern of the model
+                # jumping straight to writing code that matches a *generic* convention from
+                # its training data (e.g. a common translation helper) without having checked
+                # what this specific codebase actually already uses for the same purpose.
+                self.exploration_nudge_used = True
+                messages.append(
+                    {
+                        "role": "user",
+                        "content": "OBSERVATION: before making any change, use search_code or "
+                        "read_file to confirm how similar functionality is already implemented "
+                        "elsewhere in this project (naming, helpers, imports), so your change "
+                        "matches this codebase's actual conventions rather than a generic one.",
+                    }
+                )
+                transcript.append({"iteration": iteration, "event": "exploration_nudge"})
+                continue
+
             observation = self._dispatch(act, action)
             transcript.append({"iteration": iteration, "observation": observation[:500]})
             messages.append({"role": "user", "content": f"OBSERVATION:\n{observation}"})
@@ -101,6 +124,9 @@ class AgentLoop:
                 grammar=self.grammar,
                 temperature=0.2,
                 max_tokens=self.max_tokens_per_turn,
+                repeat_penalty=1.3,
+                frequency_penalty=0.3,
+                presence_penalty=0.2,
             )
         except Exception as e:
             print(f"WARNING: local inference call failed: {e}")
