@@ -104,6 +104,10 @@ class GroqProvider(Provider):
                 args = json.loads(tc["function"]["arguments"] or "{}")
             except json.JSONDecodeError:
                 args = {}
+            if not isinstance(args, dict):
+                # Some models emit a literal "null" (valid JSON, but not a
+                # dict) for tool calls that take no parameters.
+                args = {}
             tool_calls.append(ToolCall(id=tc["id"], name=tc["function"]["name"], arguments=args))
 
         return ProviderResponse(text=choice.get("content") or "", tool_calls=tool_calls, raw=data)

@@ -149,7 +149,7 @@ def render_transcript_comment(
         "round": round_number,
         "provider": provider_name,
         "assistant_text": assistant_text,
-        "tool_calls": [{"id": tc.id, "name": tc.name, "arguments": tc.arguments} for tc in tool_calls],
+        "tool_calls": [{"id": tc.id, "name": tc.name, "arguments": tc.arguments or {}} for tc in tool_calls],
         "tool_results": stored_results,
     }
     json_block = f"<!-- {TRANSCRIPT_MARKER}\n{json.dumps(payload)}\n-->"
@@ -163,7 +163,7 @@ def render_transcript_comment(
         lines.append("**Tool calls:**")
         by_id = {tr["tool_call_id"]: tr for tr in tool_results}
         for tc in tool_calls:
-            args_str = ", ".join(f"{k}={v!r}" for k, v in tc.arguments.items())
+            args_str = ", ".join(f"{k}={v!r}" for k, v in (tc.arguments or {}).items())
             result = by_id.get(tc.id, {}).get("content", "")
             result_preview = _truncate(result, 300).replace("\n", " ")
             lines.append(f"- `{tc.name}({args_str})` → {result_preview}")
