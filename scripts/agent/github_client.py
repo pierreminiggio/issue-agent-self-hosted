@@ -32,6 +32,16 @@ class GitHubClient:
             )
         return resp
 
+    def get_authenticated_login(self) -> str:
+        """Returns the login of the account that owns `token`. This is the
+        single trust anchor the whole "trust the messenger" model rests on:
+        only issue/comment content authored by this exact login is ever
+        treated as trusted input — see agent/history.py.
+        """
+        resp = self.session.get(f"{API_ROOT}/user")
+        self._check(resp, "fetching authenticated user")
+        return resp.json()["login"]
+
     def get_default_branch(self, owner: str, repo: str) -> str:
         resp = self.session.get(f"{API_ROOT}/repos/{owner}/{repo}")
         self._check(resp, "fetching repo metadata")

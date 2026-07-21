@@ -1,4 +1,4 @@
-name: Develop GitHub Issue (Self-Hosted Coding Agent)
+name: Develop GitHub Issue (Cloud-LLM Coding Agent)
 
 on:
   workflow_dispatch:
@@ -8,7 +8,7 @@ on:
         required: true
         type: string
       issue_number:
-        description: "Issue number in the target repository to resolve"
+        description: "Issue number in the target repository to resolve. The issue (and every comment used as input) must be authored by the account owning DEV_AGENT_PAT — anything else is refused."
         required: true
         type: string
       draft_pr:
@@ -17,23 +17,18 @@ on:
         type: boolean
         default: true
       max_iterations:
-        description: "Max agent tool-call iterations before giving up"
+        description: "Max agent tool-call rounds before giving up"
         required: false
         type: string
         default: "40"
 
-env:
-  MODEL_REPO: bartowski/Qwen2.5-Coder-7B-Instruct-GGUF
-  MODEL_FILE: Qwen2.5-Coder-7B-Instruct-Q4_K_M.gguf
-  MODEL_PATH: models/Qwen2.5-Coder-7B-Instruct-Q4_K_M.gguf
-
 jobs:
   develop:
     runs-on: ubuntu-latest
-    # Comfortably under the 6h hard limit for GitHub-hosted runners, leaving
-    # room for setup/model download/git steps around the agent's own time
-    # budget (AGENT_TIME_BUDGET_SECONDS below).
-    timeout-minutes: 350
+    # No local model to download and no local inference, so this should
+    # finish in minutes to tens of minutes for most issues, not hours — the
+    # generous ceiling just guards against a runaway conversation.
+    timeout-minutes: 120
     steps:
       - name: Checkout agent scripts
         uses: actions/checkout@v4
@@ -44,38 +39,17 @@ jobs:
           python-version: "3.11"
 
       - name: Install dependencies
-        run: |
-          pip install requests
-          pip install llama-cpp-python --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cpu
+        run: pip install -r requirements.txt
 
-      - name: Cache LLM model weights
-        id: cache-model
-        uses: actions/cache@v4
-        with:
-          path: models
-          key: model-${{ env.MODEL_FILE }}
-
-      - name: Download model weights
-        if: steps.cache-model.outputs.cache-hit != 'true'
-        run: |
-          mkdir -p models
-          MODEL_URL="https://huggingface.co/${MODEL_REPO}/resolve/main/${MODEL_FILE}"
-          echo "Downloading ${MODEL_URL}"
-          if ! curl -sSL -f -o "${MODEL_PATH}" "${MODEL_URL}"; then
-            echo "ERROR: failed to download model from ${MODEL_URL}"
-            echo "Check that MODEL_REPO/MODEL_FILE point to a real, non-split file at:"
-            echo "https://huggingface.co/${MODEL_REPO}/tree/main"
-            exit 1
-          fi
-
-      - name: Run coding agent (local LLM, no external API calls)
+      - name: Run coding agent (cloud LLM, tools executed locally)
         env:
           TARGET_REPO: ${{ inputs.repo }}
           ISSUE_NUMBER: ${{ inputs.issue_number }}
           DRAFT_PR: ${{ inputs.draft_pr }}
           MAX_ITERATIONS: ${{ inputs.max_iterations }}
-          AGENT_TIME_BUDGET_SECONDS: "14400"
+          AGENT_TIME_BUDGET_SECONDS: "6000"
           GH_TOKEN: ${{ secrets.DEV_AGENT_PAT }}
-          MODEL_PATH: ${{ env.MODEL_PATH }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         run: |
           python scripts/develop_issue.py

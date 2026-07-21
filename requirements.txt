@@ -1,6 +1,1 @@
 requests
-# CPU wheel; on the GitHub Actions workflow this is installed with the
-# --extra-index-url flag instead (see .github/workflows/develop-issue.yml).
-# For local use on a machine with a GPU, install a GPU build of
-# llama-cpp-python separately instead of this line.
-llama-cpp-python

@@ -1,153 +1,170 @@
 # issue-agent-self-hosted
 
 A GitHub Action that takes an issue number in one of your repos, clones that
-repo, and runs a **self-hosted, local LLM** as an autonomous coding agent to
-resolve the issue — reading files, searching the codebase, writing changes,
-running the project's own test suite, and iterating — then pushes a branch
-and opens a **draft pull request** with the result. No calls to any external
-AI API are made; everything runs inside the GitHub Actions runner.
+repo, and runs an autonomous coding agent to resolve the issue — reading
+files, searching the codebase, writing changes, running the project's own
+test suite, and iterating — then pushes a branch and opens a **draft pull
+request** with the result.
 
-This is the sibling of `patrimoi-transactions-extractor-self-hosted`, same
-approach (`llama-cpp-python` + a quantized GGUF model on a free GitHub-hosted
-runner) applied to a much harder, open-ended task.
+## Architecture
+
+The "local agent" (this repo's Python code, running inside the GitHub
+Actions runner) does **no reasoning of its own**. It has no model in it.
+Its whole job is:
+
+- fetch the issue and its comments, and refuse to run at all unless the
+  issue was opened by a trusted account (see Security below)
+- hand the conversation to a cloud model (Groq or Gemini) that can call
+  tools (`get_project_tree`, `read_file`, `search_code`, `write_file`,
+  `edit_file`, `run_tests`, `ask_user`, `finish`)
+- execute whatever tool call the cloud model asks for, sandboxed to the
+  repo checkout, and hand the result straight back
+- post every round of that exchange to the issue as a comment, so you can
+  watch the conversation happen in real time
+- once the model calls `finish`, commit whatever changed and open a draft PR
+
+```
+scripts/develop_issue.py            entry point: trust check, clone, run, PR
+scripts/agent/history.py            trust filtering + transcript comment format
+scripts/agent/orchestrator.py       the round loop + provider failover
+scripts/agent/tools.py              tool schema + the executor (repo_tools/test_runner wrapper)
+scripts/agent/repo_tools.py         sandboxed list/read/search/write/edit file ops
+scripts/agent/test_runner.py        static test-command detection + execution
+scripts/agent/providers/base.py     provider-agnostic interface both LLMs implement
+scripts/agent/providers/groq_provider.py
+scripts/agent/providers/gemini_provider.py
+scripts/agent/github_client.py      minimal GitHub REST API wrapper
+```
+
+Earlier versions of this project ran a local 7B GGUF model
+(`llama-cpp-python`) as the reasoning engine, with a grammar-constrained
+single-JSON-action loop to keep it from producing garbage. That's gone: a
+cloud model with real tool-calling does the reasoning now, and the local
+side is a thin, deterministic tool executor plus GitHub glue.
 
 ## Read this before using it
 
-**Model quality.** This runs a 7B coding model on CPU, not a frontier hosted
-model. It's genuinely useful for small, well-described, self-contained
-issues in a codebase (a bug with a clear repro, a small well-specified
-feature, a missing validation, etc). It will struggle with large
-architectural changes, ambiguous requirements, or issues that require
-understanding a lot of the codebase at once. Treat it like a junior
-contributor working alone overnight, not a replacement for you.
-
 **Every PR is a draft, and every PR must be reviewed.** The agent's output
 is never merged automatically. Review the diff like you would any other
-contribution — the model can misunderstand the issue, write code that
-"passes" trivially, or (rarely) do something odd if the issue text itself
-contains confusing or adversarial instructions (see Security below).
+contribution.
 
-**Time and cost.** This is free (GitHub-hosted `ubuntu-latest` runners,
-public repos get free minutes), but slow: CPU inference plus an agent loop
-that reads/writes/tests iteratively can run for a long time. The workflow
-budgets up to ~4 hours for the agent loop itself (`AGENT_TIME_BUDGET_SECONDS`)
-inside a 350-minute job timeout, comfortably under the 6-hour hard limit
-GitHub imposes on hosted-runner jobs. Most issues will finish well before
-that, but don't be surprised if a run takes 30–90 minutes.
+**Watch the conversation, not just the diff.** Every round — the model's
+reasoning, which tool it called, and what came back — is posted as a
+comment on the issue as it happens. If a run goes somewhere you don't
+expect, you'll see it there before the PR even opens.
 
 ## Setup
 
-1. **Create a PAT** for the agent to use against your target repositories.
-   A fine-grained personal access token scoped to just the repos you'll
-   point this at, with:
+1. **Create a PAT** for the agent to use. A fine-grained personal access
+   token scoped to the repos you'll point this at, with:
    - Contents: Read and write
    - Pull requests: Read and write
    - Issues: Read and write
 
-   Add it as a secret named `DEV_AGENT_PAT` in **this** repo (the one
-   hosting the workflow) — not in the target repo.
+   Add it as a secret named `DEV_AGENT_PAT` in **this** repo. This is
+   necessary regardless of who owns the target repo: the default
+   `GITHUB_TOKEN` a workflow gets only has access to the repo the workflow
+   itself lives in.
 
-   This is necessary regardless of who owns the target repo: the default
-   `GITHUB_TOKEN` GitHub Actions gives a workflow only has access to the repo
-   the workflow itself lives in, not other repos you point it at.
+   **This PAT's own account is also the one trusted account this whole
+   project runs on — see Security below.** Only issues (and comments) it
+   itself authored are ever acted on.
 
-2. Push this repo to GitHub as-is (the `models/` directory is empty in git;
-   the model is downloaded and cached by the workflow on first run).
+2. **Add cloud provider keys** as secrets: `GROQ_API_KEY`, `GEMINI_API_KEY`,
+   or both. At least one is required. If both are set, Groq is tried first
+   each round and Gemini is used as a live failover if Groq is rate-limited
+   or erroring — mid-conversation, with the same message history.
 
-3. Trigger it: **Actions → Develop GitHub Issue (Self-Hosted Coding Agent) →
+3. Push this repo to GitHub as-is.
+
+4. **Open (or already have) the issue you want resolved — from the
+   `DEV_AGENT_PAT` account itself.** See Security below for why.
+
+5. Trigger it: **Actions → Develop GitHub Issue (Cloud-LLM Coding Agent) →
    Run workflow**, and fill in:
-   - `repo`: `owner/name` of the repo with the issue (must be a repo your
-     `DEV_AGENT_PAT` can write to)
+   - `repo`: `owner/name` of the repo with the issue
    - `issue_number`: the issue to resolve
    - `draft_pr` / `max_iterations`: optional, sensible defaults provided
 
-## How it works
+## Talking to the agent, and resuming a run
 
-```
-scripts/develop_issue.py        orchestration: fetch issue, clone repo,
-                                 run the agent, commit/push/open PR
-scripts/agent/schema.py         the JSON action schema + system prompt
-scripts/agent/repo_tools.py     sandboxed list/read/search/write file tools
-scripts/agent/test_runner.py    static test-command detection + execution
-scripts/agent/llm_agent.py      the ReAct loop itself
-scripts/agent/github_client.py  minimal GitHub REST API wrapper
-```
+Because the local side keeps no memory of its own between runs, all
+conversation state lives on the issue itself, as comments:
 
-Each turn, the model is asked for exactly one JSON action (`list_files`,
-`read_file`, `search_code`, `write_file`, `run_tests`, or `finish`).
-`llama-cpp-python`'s grammar-constrained decoding
-(`LlamaGrammar.from_json_schema`) forces every completion to be valid JSON
-using one of those action names — this matters much more here than it did
-for the PDF extractor, because a broken turn in an agent *loop* would
-otherwise either crash the job or let the model wander off into unstructured
-prose instead of taking an action.
+- Each round the cloud model takes is posted as one comment: a hidden JSON
+  block (so a later run can reconstruct the exact conversation) plus a
+  human-readable rendition underneath it.
+- If the model calls `ask_user`, the run stops and posts the question as a
+  comment. **Reply on the issue from the `DEV_AGENT_PAT` account** with your
+  answer, then re-run the workflow on the same issue — it will replay the
+  full prior conversation (including your reply) and continue from there.
+- Want to redirect a run that's already finished or is heading the wrong
+  way? Post a plain comment (no special formatting needed) from the
+  `DEV_AGENT_PAT` account and re-run the workflow.
 
-Test execution is auto-detected from the repo's own files (pytest/
-pyproject.toml, package.json, go.mod, Cargo.toml, or a Makefile `test:`
-target) — the agent can ask to run tests, but cannot choose what command
-that means. If nothing is detected, `run_tests` just tells the model so, and
-it proceeds on reading/review alone.
+## Security model — "trust the messenger"
 
-## Security model — why there's no shell tool
+Issue titles/bodies/comments are attacker-reachable input: on a public repo,
+anyone can open an issue or comment on one. Rather than trying to sanitize
+or detect adversarial text, this project sidesteps the problem by never
+reading content whose author it doesn't already trust:
 
-The issue title/body/comments are attacker-reachable input: anyone who can
-open an issue on the target repo can put arbitrary text in front of the
-model. If the agent had a generic "run this shell command" tool, a
-malicious or compromised issue could try to get it to exfiltrate the PAT,
-hit an external URL, or otherwise do something well outside "edit this
-codebase." This project avoids that entire class of problem by not
-exposing one:
+- **Exactly one GitHub account is trusted**: whoever owns `DEV_AGENT_PAT`.
+- Before anything else, the agent fetches the issue and checks
+  `issue.user.login`. **If the issue itself wasn't opened by that account,
+  the run refuses entirely** — no comments are read, nothing is sent to a
+  model, nothing is cloned. A short comment explaining the refusal is
+  posted (safe, since it's the bot's own text, not a reflection of
+  anything untrusted).
+- Every comment on the issue is checked the same way, one by one, by author
+  login *before* its body is read at all. Anything from a different account
+  is discarded at that point and never reaches the model, a log line, or a
+  file.
+- Comments that do pass the check are split into two kinds: ones the agent
+  itself posted (identified by an invisible marker, replayed as structured
+  history) and everything else from that same trusted account (treated as
+  plain instructions/feedback).
 
-- **No shell/exec tool of any kind.** Only `list_files`, `read_file`,
-  `search_code`, `write_file`, and a fixed `run_tests` are available.
+On top of that, the usual tool-level sandboxing still applies:
+
+- **No shell/exec tool of any kind.** Only `get_project_tree`, `list_files`,
+  `read_file`, `search_code`, `write_file`, `edit_file`, and a fixed
+  `run_tests` are available.
 - **File tools are sandboxed** to the cloned repo directory; absolute paths
-  and `..` traversal are rejected before touching the filesystem
-  (`agent/repo_tools.py::_resolve`).
-- **The test command is statically detected, not model-supplied** — the
-  agent can trigger "run the tests" but never define what that command is.
-- **PRs are opened as drafts** and clearly labeled as AI-generated, so
-  review is expected, not optional.
+  and `..` traversal are rejected before touching the filesystem.
+- **The test command is statically detected, not model-supplied.**
+- **PRs are opened as drafts** and clearly labeled as AI-generated.
 
-This is a reasonable middle ground, not a formal security boundary — the
-runner itself still has normal internet access (e.g. `pip`/`npm install`
-during test setup can reach the network), and a sufficiently capable model
-could still write source code that does something bad if a human then
-merges and runs it without review. The mitigations above remove the cheap,
-obvious attack (a hostile issue directly commanding a shell tool); they
-don't replace reviewing the diff.
+This is a practical mitigation, not a formal security boundary — the runner
+still has normal internet access, and a capable model could still write
+code that does something bad if merged without review. What it removes is
+the cheap, obvious attack: a hostile public issue or comment trying to
+smuggle instructions to the model. It doesn't replace reviewing the diff.
 
 ## Configuration
 
-Environment/workflow inputs of interest (see the workflow file for the
-full list):
-
 | Variable | Default | Meaning |
 |---|---|---|
-| `MODEL_REPO` / `MODEL_FILE` | Qwen2.5-Coder-7B-Instruct, Q4_K_M | swap for another GGUF coding model if you want to trade speed for quality |
-| `max_iterations` (input) | 40 | hard cap on agent tool calls per run |
-| `AGENT_TIME_BUDGET_SECONDS` | 14400 (4h) | wall-clock cap on the agent loop itself |
+| `GROQ_API_KEY` / `GEMINI_API_KEY` | — | at least one required; both enables failover |
+| `GROQ_MODEL` | `llama-3.3-70b-versatile` | override Groq model |
+| `GEMINI_MODEL` | `gemini-2.0-flash` | override Gemini model |
+| `max_iterations` (input) | 40 | hard cap on tool-call rounds per run |
+| `AGENT_TIME_BUDGET_SECONDS` | 6000 | wall-clock cap on the orchestrator loop |
 | `draft_pr` (input) | true | set false if you're comfortable with non-draft PRs |
-| `LLM_N_CTX` | 16384 | context window; raise if you hit truncated context on large repos (uses more RAM) |
-
-### Using a bigger model / your own GPU runner later
-
-If you ever add a self-hosted runner with a GPU, you don't need to change
-anything about the agent logic — only:
-- point `runs-on` at your runner label instead of `ubuntu-latest`,
-- install a CUDA/Metal build of `llama-cpp-python` instead of the CPU wheel,
-- optionally switch `MODEL_REPO`/`MODEL_FILE` to a larger model (e.g.
-  Qwen2.5-Coder-14B or 32B) for noticeably better code quality.
 
 ## Known limitations
 
-- Edits to existing files are anchored, surgical replacements (`edit_file`: find an exact
-  unique snippet, replace it), not full-file rewrites. `write_file` only ever creates brand-new
-  files and refuses to touch an existing one. This is deliberate: a full-file rewrite requires
-  the model to faithfully reproduce every untouched line from memory, and on a large file over
-  a long session that can silently drop content — anchored edits make it structurally
-  impossible for an edit to touch anything outside the snippet it explicitly quoted.
+- Edits to existing files are anchored, surgical replacements (`edit_file`:
+  find an exact unique snippet, replace it), not full-file rewrites.
+  `write_file` only ever creates brand-new files. This is deliberate: a
+  full-file rewrite requires the model to faithfully reproduce every
+  untouched line from memory, and on a large file that can silently drop
+  content — anchored edits make that structurally impossible.
 - No dependency installation beyond a best-effort `pip install -r
   requirements.txt` / `npm ci` before running tests; projects with more
   involved setup (databases, docker-compose, etc.) will likely show test
   failures unrelated to the agent's actual change.
 - One issue per run; no batching multiple issues in one workflow dispatch.
+- The trust model means only the `DEV_AGENT_PAT` account's own issues can be
+  worked on — a contributor filing an issue on your behalf doesn't work
+  unless you re-post it (or its content) yourself from that account.

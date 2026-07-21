@@ -1,36 +1,43 @@
 """
-Entry point: given a target repo + issue number, clone the repo, run the
-local-LLM coding agent against it, and (if it produced changes) push a branch
-and open a draft pull request back on that repo.
+Entry point: given a target repo + issue number, verify the issue is
+trusted, clone the repo, run the orchestrator (cloud-model-driven, tools
+executed locally) against it, post the conversation to the issue as it
+happens, and — if the model finished with changes — push a branch and open
+a draft pull request.
 
 Required environment variables:
   TARGET_REPO       "owner/name" of the repo to work on
   ISSUE_NUMBER      issue number to resolve
   GH_TOKEN          PAT with write access to TARGET_REPO (contents, pull
-                     requests, issues)
-  MODEL_PATH        path to the local GGUF model file
+                     requests, issues). This PAT's own account is also the
+                     sole trusted author for issue/comment content — see
+                     agent/history.py.
+
+At least one of:
+  GROQ_API_KEY
+  GEMINI_API_KEY
 
 Optional:
   DRAFT_PR                  "true"/"false", default "true"
   MAX_ITERATIONS             default 40
   AGENT_TIME_BUDGET_SECONDS  default 14400 (4h) — leaves headroom under the
-                              GitHub Actions 6h job limit for setup/model
-                              download/git operations either side of the loop
-  LLM_N_CTX                  default 24576
+                              GitHub Actions 6h job limit for setup/git
+                              operations either side of the loop
+  GROQ_MODEL / GEMINI_MODEL  override default model per provider
 """
 from __future__ import annotations
 
 import os
 import subprocess
-import sys
 from pathlib import Path
 
-from llama_cpp import Llama
-
+from agent import history
 from agent.github_client import GitHubClient
-from agent.llm_agent import AgentLoop
-from agent.repo_tools import RepoTools
-from agent.test_runner import detect_test_command, run_tests
+from agent.orchestrator import Orchestrator
+from agent.providers.base import Provider
+from agent.providers.gemini_provider import GeminiProvider
+from agent.providers.groq_provider import GroqProvider
+from agent.tools import ToolExecutor
 
 WORKDIR = Path("target-repo")
 
@@ -49,7 +56,7 @@ def run_git(args: list, cwd=None, mask: str | None = None):
     failed clone/push never leaks the PAT into the Actions log."""
     proc = subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True)
     if proc.returncode != 0:
-        out = (proc.stdout + proc.stderr)
+        out = proc.stdout + proc.stderr
         if mask:
             out = out.replace(mask, "***")
         print(f"ERROR: git {' '.join(args if not mask else ['<redacted>'])} failed:\n{out}")
@@ -57,28 +64,47 @@ def run_git(args: list, cwd=None, mask: str | None = None):
     return proc.stdout
 
 
+def build_providers() -> list[Provider]:
+    providers: list[Provider] = []
+    groq_key = env("GROQ_API_KEY")
+    gemini_key = env("GEMINI_API_KEY")
+    if groq_key:
+        providers.append(GroqProvider(groq_key, model=env("GROQ_MODEL") or "llama-3.3-70b-versatile"))
+    if gemini_key:
+        providers.append(GeminiProvider(gemini_key, model=env("GEMINI_MODEL") or "gemini-2.0-flash"))
+    if not providers:
+        print("ERROR: at least one of GROQ_API_KEY or GEMINI_API_KEY must be set.")
+        raise SystemExit(1)
+    return providers
+
+
 def main():
     target_repo = env("TARGET_REPO", required=True)
     issue_number = int(env("ISSUE_NUMBER", required=True))
     token = env("GH_TOKEN", required=True)
-    model_path = env("MODEL_PATH", required=True)
     draft_pr = env("DRAFT_PR", "true").lower() != "false"
     max_iterations = int(env("MAX_ITERATIONS", "40"))
     time_budget = int(env("AGENT_TIME_BUDGET_SECONDS", str(4 * 3600)))
-    n_ctx = int(env("LLM_N_CTX", "24576"))
 
     owner, repo = target_repo.split("/", 1)
-
-    if not os.path.exists(model_path):
-        print(f"ERROR: model file not found at {model_path}")
-        raise SystemExit(1)
-
     gh = GitHubClient(token)
+
+    print("Identifying trusted account ...")
+    trusted_login = gh.get_authenticated_login()
 
     print(f"Fetching issue #{issue_number} from {target_repo} ...")
     issue = gh.get_issue(owner, repo, issue_number)
-    default_branch = gh.get_default_branch(owner, repo)
 
+    try:
+        trusted_comments = history.filter_trusted(issue, trusted_login)
+    except history.UntrustedIssueError as e:
+        print(f"REFUSING TO RUN: {e}")
+        gh.add_issue_comment(owner, repo, issue_number, history.render_refusal_comment(trusted_login))
+        raise SystemExit(1)
+
+    initial_messages = history.build_initial_messages(issue, trusted_comments)
+
+    default_branch = gh.get_default_branch(owner, repo)
     branch_name = f"agent/issue-{issue_number}"
     clone_url = f"https://x-access-token:{token}@github.com/{owner}/{repo}.git"
 
@@ -88,77 +114,60 @@ def main():
     run_git(["config", "user.name", "issue-agent[bot]"], cwd=WORKDIR)
     run_git(["config", "user.email", "issue-agent-bot@users.noreply.github.com"], cwd=WORKDIR)
 
-    detected = detect_test_command(str(WORKDIR))
-    if detected:
-        install_cmds, test_cmd, description = detected
-        print(f"Detected test runner: {description}")
+    providers = build_providers()
+    print(f"Configured providers (in failover order): {[p.name for p in providers]}")
 
-        def run_tests_fn():
-            return run_tests(str(WORKDIR), install_cmds, test_cmd)
-    else:
-        print("No test runner detected; the agent will proceed without automated verification.")
+    executor = ToolExecutor(str(WORKDIR))
 
-        def run_tests_fn():
-            return (
-                "No test runner could be detected for this project (checked for pytest/"
-                "pyproject, package.json, go.mod, Cargo.toml, Makefile). Tests were not run."
-            )
+    def post_comment(body: str) -> None:
+        gh.add_issue_comment(owner, repo, issue_number, body)
 
-    print(f"Loading model from {model_path} (n_ctx={n_ctx}) ...")
-    llm = Llama(model_path=model_path, n_ctx=n_ctx, n_threads=os.cpu_count(), verbose=False)
-
-    tools = RepoTools(str(WORKDIR))
-    loop = AgentLoop(
-        llm=llm,
-        repo_tools=tools,
-        run_tests_fn=run_tests_fn,
-        max_iterations=max_iterations,
+    orchestrator = Orchestrator(
+        providers=providers,
+        executor=executor,
+        post_comment=post_comment,
+        max_rounds=max_iterations,
         max_seconds=time_budget,
     )
 
-    print("Starting agent loop ...")
-    result = loop.run(target_repo, issue)
-    print(f"Agent loop finished. finished={result['finished']} modified_files={result['modified_files']}")
+    print("Starting orchestrator ...")
+    result = orchestrator.run(target_repo, issue_number, initial_messages)
+    print(f"Orchestrator finished: status={result.status} rounds_used={result.rounds_used}")
 
-    if not result["modified_files"]:
-        message = (
-            "The self-hosted coding agent looked at this issue but did not make any code "
-            f"changes.\n\nReason given: {result['summary']}"
+    if result.status == "error":
+        print(f"ERROR: {result.error}")
+        gh.add_issue_comment(
+            owner, repo, issue_number, f"⚠️ The coding agent stopped due to an error: {result.error}"
         )
-        print("No files modified; commenting on the issue instead of opening a PR.")
-        gh.add_issue_comment(owner, repo, issue_number, message)
-        return
+        raise SystemExit(1)
 
+    if result.status == "waiting_for_human":
+        print(f"Waiting for human input: {result.question}")
+        return  # question comment already posted by the orchestrator
+
+    # status == "finished"
     diff = run_git(["status", "--porcelain"], cwd=WORKDIR)
     if not diff.strip():
-        print("Agent reported modified files but working tree is clean; nothing to commit.")
+        print("Agent finished but no files were changed; nothing to commit.")
         gh.add_issue_comment(
             owner, repo, issue_number,
-            "The self-hosted coding agent attempted changes for this issue but no net "
-            "difference remained afterward.",
+            f"The coding agent finished without making any file changes.\n\nSummary: {result.summary}",
         )
         return
 
     run_git(["add", "-A"], cwd=WORKDIR)
-    run_git(["commit", "-m", f"Automated fix for #{issue_number}\n\n{result['summary']}"], cwd=WORKDIR)
+    run_git(["commit", "-m", f"Automated fix for #{issue_number}\n\n{result.summary}"], cwd=WORKDIR)
     run_git(["push", "-u", clone_url, branch_name], cwd=WORKDIR, mask=token)
 
-    test_note = ""
-    if result["tests_ever_run"] and result["last_test_result"]:
-        test_note = f"\n\n---\n**Last test run:**\n```\n{result['last_test_result'][-2000:]}\n```"
-    elif not result["tests_ever_run"]:
-        test_note = "\n\n---\n**Note:** the agent never ran the test suite before finishing."
-
     body = (
-        f"{result['summary']}\n\n"
+        f"{result.summary}\n\n"
         f"---\n"
-        f"⚠️ This pull request was generated automatically by a self-hosted, local LLM coding "
-        f"agent in response to #{issue_number}. It has not been reviewed by a human. Please "
-        f"review the diff carefully before merging.\n\n"
-        f"Modified files: {', '.join(result['modified_files'])}"
-        f"{test_note}"
+        f"⚠️ This pull request was generated automatically by a cloud-LLM-driven coding agent "
+        f"in response to #{issue_number}. It has not been reviewed by a human. Please review "
+        f"the diff carefully before merging.\n\n"
+        f"The full step-by-step conversation between the local agent and the cloud model is "
+        f"posted as comments on #{issue_number}."
     )
-
     pr = gh.create_pull_request(
         owner, repo,
         head=branch_name,
