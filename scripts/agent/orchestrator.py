@@ -20,8 +20,14 @@ import time
 from dataclasses import dataclass, field
 from typing import Any
 
-from . import history
-from .providers.base import Provider, ProviderProtocolError, ProviderUnavailableError, ToolCall
+from . import context, history
+from .providers.base import (
+    Provider,
+    ProviderProtocolError,
+    ProviderRequestTooLargeError,
+    ProviderUnavailableError,
+    ToolCall,
+)
 from .tools import TOOL_SPECS, ToolExecutionError, ToolExecutor
 
 SYSTEM_PROMPT_TEMPLATE = """\
@@ -89,14 +95,19 @@ class Orchestrator:
     def _send_with_failover(self, system_prompt: str, messages: list[dict[str, Any]]):
         errors = []
         for provider in self.providers:
-            try:
-                return provider, provider.send(system_prompt, messages, TOOL_SPECS)
-            except ProviderUnavailableError as e:
-                errors.append(f"{provider.name}: {e}")
-                continue
-            except ProviderProtocolError as e:
-                errors.append(f"{provider.name}: {e}")
-                continue
+            for level in context.COMPACTION_LEVELS:
+                trimmed = context.compact_messages(messages, **level)
+                try:
+                    return provider, provider.send(system_prompt, trimmed, TOOL_SPECS)
+                except ProviderRequestTooLargeError as e:
+                    errors.append(f"{provider.name} ({level}): {e}")
+                    continue  # try a smaller compaction level on this SAME provider
+                except ProviderUnavailableError as e:
+                    errors.append(f"{provider.name}: {e}")
+                    break  # genuine outage/quota — no point retrying this provider at all
+                except ProviderProtocolError as e:
+                    errors.append(f"{provider.name}: {e}")
+                    break
         raise RuntimeError(
             "All configured providers failed or are unavailable this round:\n" + "\n".join(errors)
         )

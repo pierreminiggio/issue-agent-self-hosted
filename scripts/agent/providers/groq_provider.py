@@ -10,7 +10,14 @@ from typing import Any
 
 import requests
 
-from .base import Provider, ProviderProtocolError, ProviderResponse, ProviderUnavailableError, ToolCall
+from .base import (
+    Provider,
+    ProviderProtocolError,
+    ProviderRequestTooLargeError,
+    ProviderResponse,
+    ProviderUnavailableError,
+    ToolCall,
+)
 
 API_URL = "https://api.groq.com/openai/v1/chat/completions"
 DEFAULT_MODEL = "llama-3.3-70b-versatile"
@@ -87,6 +94,8 @@ class GroqProvider(Provider):
         except requests.RequestException as e:
             raise ProviderUnavailableError(f"Groq request failed: {e}") from e
 
+        if resp.status_code == 413:
+            raise ProviderRequestTooLargeError(f"Groq request too large: HTTP 413: {resp.text[:300]}")
         if resp.status_code == 429 or resp.status_code >= 500:
             raise ProviderUnavailableError(f"Groq unavailable: HTTP {resp.status_code}: {resp.text[:300]}")
         if not resp.ok:

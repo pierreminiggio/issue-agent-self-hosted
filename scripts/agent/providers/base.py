@@ -37,6 +37,16 @@ class ProviderUnavailableError(Exception):
     """
 
 
+class ProviderRequestTooLargeError(ProviderUnavailableError):
+    """The request itself exceeded a per-request/per-minute token budget
+    (e.g. Groq's HTTP 413 tokens-per-minute limit). Unlike a generic outage,
+    retrying the *same* provider can succeed if the request is shrunk first
+    — so the orchestrator retries this provider with a smaller, more
+    compacted message history before giving up on it and moving to the next
+    configured provider.
+    """
+
+
 class ProviderProtocolError(Exception):
     """The provider returned something we couldn't parse (malformed tool
     call args, unexpected response shape). Not necessarily retryable on a
