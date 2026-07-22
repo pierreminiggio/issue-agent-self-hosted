@@ -44,7 +44,8 @@ from .tools import TOOL_SPECS, ToolExecutionError, ToolExecutor
 
 SYSTEM_PROMPT_TEMPLATE = """\
 You are an autonomous software engineer working against a real Git repository \
-checkout, resolving GitHub issue #{issue_number} in {repo}.
+checkout, resolving GitHub issue #{issue_number} in {repo}. You are working on \
+branch {branch_name}{resumed_note}.
 
 You do not have the repository contents yet. You have a small set of tools to \
 explore and modify it — you must call these tools to get anything done; you \
@@ -56,8 +57,17 @@ Rules:
 at their contents.
 - Prefer edit_file (exact old_str/new_str replacement) over write_file for any \
 file that already exists. write_file only works for brand-new files.
-- If the repository has a test suite, run it with run_tests after making \
-changes, and fix any failures before finishing.
+- Prefer a test-driven approach where practical: write or extend a test that \
+captures the requested behavior first (or alongside the implementation), then \
+make it pass, rather than only adding tests after the fact. This isn't always \
+possible (e.g. a trivial copy/config fix) — use judgment, but default to it \
+for actual feature/logic work.
+- If this repository has a detected test suite, run it with run_tests after \
+making changes, and fix any failures. This is enforced, not just requested: \
+finish will be refused with an explanation if tests haven't been run since \
+your last change or the last run failed — do not consider the work done, and \
+do not treat a failing test suite as acceptable to ship, until run_tests \
+reports ALL TEST SUITES PASSED.
 - If you're missing information you can't reasonably infer from the code \
 (business rules, product decisions, ambiguous requirements), call ask_user \
 instead of guessing. This ends the run until a human replies, so use it only \
@@ -65,7 +75,7 @@ when truly needed — inspect the code first.
 - When the feature/fix is complete (and tests pass, if any exist), call \
 finish with a clear summary of what you changed and why.
 - You must call exactly one tool every turn. Do not respond with plain text only.
-"""
+{repo_conventions_section}"""
 
 MAX_ROUNDS_WITHOUT_TOOL_CALL = 2
 
@@ -195,8 +205,35 @@ class Orchestrator:
             )
         )
 
-    def run(self, repo: str, issue_number: int, initial_messages: list[dict[str, Any]]) -> RunResult:
-        system_prompt = SYSTEM_PROMPT_TEMPLATE.format(issue_number=issue_number, repo=repo)
+    def run(
+        self,
+        repo: str,
+        issue_number: int,
+        initial_messages: list[dict[str, Any]],
+        branch_name: str = "(unknown)",
+        branch_is_resumed: bool = False,
+        repo_conventions: str = "",
+    ) -> RunResult:
+        resumed_note = (
+            " — this branch already exists with prior commits from an earlier run on this "
+            "same issue; inspect the current state of the code yourself rather than assuming "
+            "it's unmodified from the repo's default branch"
+            if branch_is_resumed
+            else " (newly created for this issue)"
+        )
+        conventions_section = ""
+        if repo_conventions.strip():
+            conventions_section = (
+                "\nThis repository documents its own conventions; follow them:\n"
+                f"---\n{repo_conventions.strip()}\n---\n"
+            )
+        system_prompt = SYSTEM_PROMPT_TEMPLATE.format(
+            issue_number=issue_number,
+            repo=repo,
+            branch_name=branch_name,
+            resumed_note=resumed_note,
+            repo_conventions_section=conventions_section,
+        )
         messages: list[dict[str, Any]] = list(initial_messages)
         start = time.monotonic()
         deadline = start + self.max_seconds

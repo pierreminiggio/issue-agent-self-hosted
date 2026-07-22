@@ -179,6 +179,51 @@ code that does something bad if merged without review. What it removes is
 the cheap, obvious attack: a hostile public issue or comment trying to
 smuggle instructions to the model. It doesn't replace reviewing the diff.
 
+## Testing, TDD, and not shipping broken work
+
+If a repository has a detected test suite, `finish` is a hard gate, not a
+suggestion: the tool call is refused (with an explanation the model has to
+act on) unless `run_tests` has been called since the last file edit and
+reported every suite passing. Editing a file after a passing run clears
+that pass, so the model can't run tests once early and then keep editing
+unchecked. In practice this means: if tests fail, the agent doesn't stop
+and doesn't open a PR — it keeps iterating in the same run, using the
+failure output to fix the problem, until either it passes or the run
+genuinely runs out of iterations/time.
+
+Test detection is intentionally **not** left to the model — it's either
+generic file-based detection (composer.json/phpunit, package.json,
+pyproject.toml/pytest, go.mod, Cargo.toml, a Makefile `test:` target) or a
+hardcoded override for repos with more particular setup, in
+`agent/test_runner.py`'s `REPO_OVERRIDES`. There's one entry there today:
+**`pierreminiggio/cms`**, which needs `.htaccess-dev`/`env-dev-base.php`
+copied into place and runs both PHPUnit and Jest — add more entries the
+same way for any other repo whose test setup generic detection can't
+reasonably infer. The agent never gets to invent its own test command.
+
+For TDD/process conventions, the agent looks for `AGENTS.md`, `CLAUDE.md`,
+or `CONTRIBUTING.md` (first one found) at the target repo's root and folds
+it into the system prompt. This is deliberately generic rather than
+hardcoding e.g. "use TDD for cms" in this project's own code — it works for
+whatever any repo documents about itself. On top of that, the system prompt
+always nudges toward writing/extending a test alongside the implementation
+where practical, regardless of whether the repo has its own docs saying so.
+
+## Branch and PR reuse
+
+Before starting work, the agent checks whether `agent/issue-{N}` already
+exists as a branch (from an earlier run against the same issue) and clones
+that instead of branching fresh from the default branch — so a follow-up
+run (e.g. after replying to an `ask_user` question, or just re-running to
+continue) picks up from the actual prior commits, not a blank slate. The
+system prompt tells the model explicitly when this is the case, since the
+code it's looking at may already reflect earlier changes.
+
+Likewise, before opening a pull request, it checks for an existing open PR
+with that branch as its head. If one exists, new commits are just pushed to
+the branch (which updates that PR automatically) and a comment links to it,
+rather than opening a duplicate.
+
 ## Configuration
 
 | Variable | Default | Meaning |

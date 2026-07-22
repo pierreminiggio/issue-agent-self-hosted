@@ -71,6 +71,27 @@ class GitHubClient:
         self._check(resp, f"commenting on issue #{number}")
         return resp.json()
 
+    def branch_exists(self, owner: str, repo: str, branch: str) -> bool:
+        resp = self.session.get(f"{API_ROOT}/repos/{owner}/{repo}/git/ref/heads/{branch}")
+        if resp.status_code == 404:
+            return False
+        self._check(resp, f"checking for branch '{branch}'")
+        return True
+
+    def find_open_pr_for_branch(self, owner: str, repo: str, branch: str) -> dict | None:
+        """Returns the open PR whose head is `branch`, if one exists. Used to
+        avoid opening a duplicate PR when resuming work on an issue that
+        already has one — pushing new commits to the same branch updates
+        that existing PR automatically, no extra API call needed for that
+        part."""
+        resp = self.session.get(
+            f"{API_ROOT}/repos/{owner}/{repo}/pulls",
+            params={"head": f"{owner}:{branch}", "state": "open"},
+        )
+        self._check(resp, f"listing pull requests for branch '{branch}'")
+        prs = resp.json()
+        return prs[0] if prs else None
+
     def create_pull_request(
         self,
         owner: str,

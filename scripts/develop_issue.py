@@ -116,16 +116,33 @@ def main():
     branch_name = f"agent/issue-{issue_number}"
     clone_url = f"https://x-access-token:{token}@github.com/{owner}/{repo}.git"
 
-    print(f"Cloning {target_repo} (branch {default_branch}) ...")
-    run_git(["clone", "--depth", "50", "--branch", default_branch, clone_url, str(WORKDIR)], mask=token)
-    run_git(["checkout", "-b", branch_name], cwd=WORKDIR)
+    branch_is_resumed = gh.branch_exists(owner, repo, branch_name)
+    if branch_is_resumed:
+        print(f"Branch {branch_name} already exists — resuming work on it instead of starting fresh.")
+        run_git(["clone", "--depth", "50", "--branch", branch_name, clone_url, str(WORKDIR)], mask=token)
+    else:
+        print(f"Cloning {target_repo} (branch {default_branch}) ...")
+        run_git(["clone", "--depth", "50", "--branch", default_branch, clone_url, str(WORKDIR)], mask=token)
+        run_git(["checkout", "-b", branch_name], cwd=WORKDIR)
     run_git(["config", "user.name", "issue-agent[bot]"], cwd=WORKDIR)
     run_git(["config", "user.email", "issue-agent-bot@users.noreply.github.com"], cwd=WORKDIR)
+
+    # A handful of common names for a repo's own documented conventions —
+    # first one found (if any) gets folded into the system prompt. This is
+    # how repo-specific process (e.g. cms's own TDD expectation) reaches the
+    # model, without hardcoding any particular repo's name in this script.
+    repo_conventions = ""
+    for candidate in ("AGENTS.md", "CLAUDE.md", "CONTRIBUTING.md"):
+        candidate_path = WORKDIR / candidate
+        if candidate_path.exists():
+            print(f"Found repo conventions doc: {candidate}")
+            repo_conventions = candidate_path.read_text(encoding="utf-8", errors="ignore")[:8000]
+            break
 
     providers = build_providers()
     print(f"Configured providers (in failover order): {[p.name for p in providers]}")
 
-    executor = ToolExecutor(str(WORKDIR))
+    executor = ToolExecutor(str(WORKDIR), target_repo=target_repo)
 
     def post_comment(body: str) -> None:
         gh.add_issue_comment(owner, repo, issue_number, body)
@@ -140,7 +157,10 @@ def main():
     )
 
     print("Starting orchestrator ...")
-    result = orchestrator.run(target_repo, issue_number, initial_messages)
+    result = orchestrator.run(
+        target_repo, issue_number, initial_messages,
+        branch_name=branch_name, branch_is_resumed=branch_is_resumed, repo_conventions=repo_conventions,
+    )
     print(f"Orchestrator finished: status={result.status} rounds_used={result.rounds_used}")
 
     if result.status == "error":
@@ -167,6 +187,15 @@ def main():
     run_git(["add", "-A"], cwd=WORKDIR)
     run_git(["commit", "-m", f"Automated fix for #{issue_number}\n\n{result.summary}"], cwd=WORKDIR)
     run_git(["push", "-u", clone_url, branch_name], cwd=WORKDIR, mask=token)
+
+    existing_pr = gh.find_open_pr_for_branch(owner, repo, branch_name)
+    if existing_pr is not None:
+        print(f"Branch {branch_name} already has an open pull request — pushed new commits to it, not creating a new one.")
+        gh.add_issue_comment(
+            owner, repo, issue_number,
+            f"Pushed new commits to the existing pull request: {existing_pr['html_url']}\n\n{result.summary}",
+        )
+        return
 
     body = (
         f"{result.summary}\n\n"
