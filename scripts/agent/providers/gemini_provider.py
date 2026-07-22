@@ -23,6 +23,7 @@ from .base import (
     ProviderResponse,
     ProviderUnavailableError,
     ToolCall,
+    parse_retry_after_seconds,
 )
 
 API_ROOT = "https://generativelanguage.googleapis.com/v1beta/models"
@@ -96,7 +97,10 @@ class GeminiProvider(Provider):
         if resp.status_code == 400 and "token" in resp.text.lower():
             raise ProviderRequestTooLargeError(f"Gemini request too large: HTTP 400: {resp.text[:300]}")
         if resp.status_code == 429 or resp.status_code >= 500:
-            raise ProviderUnavailableError(f"Gemini unavailable: HTTP {resp.status_code}: {resp.text[:300]}")
+            retry_after = parse_retry_after_seconds(resp.text)
+            raise ProviderUnavailableError(
+                f"Gemini unavailable: HTTP {resp.status_code}: {resp.text[:300]}", retry_after_seconds=retry_after
+            )
         if not resp.ok:
             raise ProviderProtocolError(f"Gemini error: HTTP {resp.status_code}: {resp.text[:500]}")
 

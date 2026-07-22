@@ -89,11 +89,25 @@ expect, you'll see it there before the PR even opens.
 ## Talking to the agent, and resuming a run
 
 Because the local side keeps no memory of its own between runs, all
-conversation state lives on the issue itself, as comments:
+conversation state is anchored on the issue itself, as comments — but the
+*full* data behind each comment lives in a dedicated git branch,
+`issue-agent-transcripts` (created automatically the first time it's
+needed), not in the comment body itself:
 
-- Each round the cloud model takes is posted as one comment: a hidden JSON
-  block (so a later run can reconstruct the exact conversation) plus a
-  human-readable rendition underneath it.
+- Each round the cloud model takes is posted as one comment: a short,
+  human-readable preview (its reasoning, which tool it called, a short
+  peek at the result) plus a link to a JSON file on that branch holding the
+  complete, untruncated round — full tool arguments, full tool output, no
+  matter how large. Comment bodies are capped well below what a single file
+  read or search result can produce, so this is what keeps a long-running
+  conversation from turning into unreadable, truncated noise in the GitHub
+  UI.
+- **A resumed run reads the full files, not the comment previews.** When
+  replaying history for a follow-up run, the agent follows each comment's
+  link and loads the complete round from the branch — so it's always
+  working from everything that happened, not whatever fit in a comment. If
+  that branch or a specific file is ever unreachable, it falls back to
+  whatever's in the comment itself (degraded, but the run still proceeds).
 - If the model calls `ask_user`, the run stops and posts the question as a
   comment. **Reply on the issue from the `DEV_AGENT_PAT` account** with your
   answer, then re-run the workflow on the same issue — it will replay the
@@ -101,6 +115,30 @@ conversation state lives on the issue itself, as comments:
 - Want to redirect a run that's already finished or is heading the wrong
   way? Post a plain comment (no special formatting needed) from the
   `DEV_AGENT_PAT` account and re-run the workflow.
+
+## Handling rate limits — slow and steady
+
+Free-tier rate limits are common and usually self-clear within seconds to
+minutes, so the agent is patient rather than giving up at the first sign of
+one:
+
+- On a rate limit or transient error, it retries the **same** provider, up
+  to 20 times, waiting between attempts — honoring the provider's own
+  suggested wait time when it gives one (both Groq's and Gemini's error
+  messages are parsed for this), falling back to exponential backoff
+  (5s, 10s, 20s, ... capped at 90s) when it doesn't.
+- If a request is outright too large for a provider's per-minute token
+  budget (a real risk on free tiers as a conversation grows — every
+  round's tool results add up), it shrinks the message history sent to
+  that provider and retries immediately, rather than waiting. Waiting
+  doesn't make a request smaller; only trimming does. Older rounds get
+  progressively collapsed to short placeholders for this purpose only —
+  the full detail is never lost, since it's already safely in the
+  transcript branch either way.
+- Only once a provider has exhausted its retries does the agent move on to
+  the next configured one. All of this respects the overall time budget
+  (`AGENT_TIME_BUDGET_SECONDS`) — it won't keep retrying past the point
+  where the run would time out anyway.
 
 ## Security model — "trust the messenger"
 
@@ -151,6 +189,7 @@ smuggle instructions to the model. It doesn't replace reviewing the diff.
 | `max_iterations` (input) | 40 | hard cap on tool-call rounds per run |
 | `AGENT_TIME_BUDGET_SECONDS` | 6000 | wall-clock cap on the orchestrator loop |
 | `draft_pr` (input) | true | set false if you're comfortable with non-draft PRs |
+| `TRANSCRIPT_BRANCH` | `issue-agent-transcripts` | git branch used to store full, untruncated per-round data linked from comments |
 
 ## Known limitations
 

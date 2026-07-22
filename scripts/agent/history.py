@@ -7,12 +7,13 @@ authored by a different login is dropped before its .body is ever looked
 at, logged, or handed to a model.
 
 This module also owns the transcript comment format: every round of the
-local-agent/cloud-model exchange is posted to the issue as one comment, in
-two parts — a JSON blob (for a future run to parse back into exact replay
-history) and a human-readable rendition underneath it (for you to read in
-the GitHub UI). Only comments authored by the trusted login and carrying
-these markers are ever parsed back as structured history; everything else
-authored by that same login is treated as plain human feedback text.
+local-agent/cloud-model exchange is posted to the issue as one comment —
+a short JSON pointer plus a human-readable preview, linking out to the full,
+untruncated round data in transcript_store.py (comment bodies are capped
+well below what a tool result can produce). Only comments authored by the
+trusted login and carrying these markers are ever parsed back as structured
+history; everything else authored by that same login is treated as plain
+human feedback text.
 """
 from __future__ import annotations
 
@@ -87,12 +88,22 @@ def _classify(comment: dict) -> TrustedComment:
     return TrustedComment("human", created_at, None, body)
 
 
-def build_initial_messages(issue: dict, trusted_comments: list[TrustedComment]) -> list[dict[str, Any]]:
+def build_initial_messages(
+    issue: dict, trusted_comments: list[TrustedComment], store: Any = None
+) -> list[dict[str, Any]]:
     """Reconstructs the provider-agnostic message history from the trusted
     issue body plus every trusted comment, in chronological order. Used both
     for a brand-new run (no transcript comments yet, just the issue body)
     and for a resumed run continuing a previous conversation (e.g. after an
     ask_user pause, or after a run stopped mid-way).
+
+    `store` is a transcript_store.TranscriptStore (or None). Most transcript
+    comments only carry a pointer (round/provider + where the full data
+    lives); this follows that pointer to load the complete, untruncated
+    round rather than whatever preview fit in the comment. If the load
+    fails (branch/file missing, API hiccup) or no store is given, it falls
+    back to whatever the comment itself embedded — degraded, but the run
+    still proceeds rather than aborting.
     """
     messages: list[dict[str, Any]] = [
         {
@@ -104,6 +115,15 @@ def build_initial_messages(issue: dict, trusted_comments: list[TrustedComment]) 
     for item in trusted_comments:
         if item.kind == "transcript":
             data = item.data or {}
+            if data.get("store_path") and store is not None:
+                try:
+                    data = store.load_round(data["store_path"], ref=data.get("store_ref"))
+                except Exception as e:  # noqa: BLE001 — any load failure just degrades gracefully
+                    print(
+                        f"WARNING: could not load full transcript for round "
+                        f"{data.get('round')} from {data.get('store_path')}: {e}. "
+                        f"Falling back to the comment's own (possibly partial) data."
+                    )
             tool_calls = [
                 ToolCall(id=tc["id"], name=tc["name"], arguments=tc.get("arguments") or {})
                 for tc in data.get("tool_calls", [])
@@ -136,22 +156,40 @@ def render_transcript_comment(
     assistant_text: str,
     tool_calls: list[ToolCall],
     tool_results: list[dict[str, str]],
+    store_ref: str | None = None,
+    store_path: str | None = None,
+    store_url: str | None = None,
 ) -> str:
-    stored_results = [
-        {
-            "tool_call_id": tr["tool_call_id"],
-            "name": tr["name"],
-            "content": _truncate(tr["content"], TOOL_RESULT_STORE_CHARS),
+    """Renders one round as a comment. If store_ref/store_path are given
+    (the full round data was successfully written to the transcript store),
+    the JSON block is just a small pointer to it and store_url is linked for
+    humans. Otherwise — the store write failed, or there's simply no tool
+    data this round — the (possibly truncated) data is embedded directly,
+    same as before that store existed.
+    """
+    if store_ref and store_path:
+        payload: dict[str, Any] = {
+            "round": round_number,
+            "provider": provider_name,
+            "store_ref": store_ref,
+            "store_path": store_path,
         }
-        for tr in tool_results
-    ]
-    payload = {
-        "round": round_number,
-        "provider": provider_name,
-        "assistant_text": assistant_text,
-        "tool_calls": [{"id": tc.id, "name": tc.name, "arguments": tc.arguments or {}} for tc in tool_calls],
-        "tool_results": stored_results,
-    }
+    else:
+        stored_results = [
+            {
+                "tool_call_id": tr["tool_call_id"],
+                "name": tr["name"],
+                "content": _truncate(tr["content"], TOOL_RESULT_STORE_CHARS),
+            }
+            for tr in tool_results
+        ]
+        payload = {
+            "round": round_number,
+            "provider": provider_name,
+            "assistant_text": assistant_text,
+            "tool_calls": [{"id": tc.id, "name": tc.name, "arguments": tc.arguments or {}} for tc in tool_calls],
+            "tool_results": stored_results,
+        }
     json_block = f"<!-- {TRANSCRIPT_MARKER}\n{json.dumps(payload)}\n-->"
 
     lines = [json_block, "", f"**🤖 Round {round_number} — via {provider_name}**"]
@@ -167,6 +205,8 @@ def render_transcript_comment(
             result = by_id.get(tc.id, {}).get("content", "")
             result_preview = _truncate(result, 300).replace("\n", " ")
             lines.append(f"- `{tc.name}({args_str})` → {result_preview}")
+    if store_url:
+        lines += ["", f"📄 [Full round data (untruncated)]({store_url})"]
     return "\n".join(lines)
 
 

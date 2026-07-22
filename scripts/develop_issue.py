@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+import time
 from pathlib import Path
 
 from agent import history
@@ -38,6 +39,7 @@ from agent.providers.base import Provider
 from agent.providers.gemini_provider import GeminiProvider
 from agent.providers.groq_provider import GroqProvider
 from agent.tools import ToolExecutor
+from agent.transcript_store import DEFAULT_BRANCH_NAME, TranscriptStore
 
 WORKDIR = Path("target-repo")
 
@@ -102,7 +104,13 @@ def main():
         gh.add_issue_comment(owner, repo, issue_number, history.render_refusal_comment(trusted_login))
         raise SystemExit(1)
 
-    initial_messages = history.build_initial_messages(issue, trusted_comments)
+    # GITHUB_RUN_ID is unique per Actions run and namespaces this run's
+    # transcript files, so a resumed run's round numbering (which restarts
+    # at 1) can never collide with an earlier run's files for this issue.
+    run_id = env("GITHUB_RUN_ID") or str(int(time.time()))
+    transcript_store = TranscriptStore(gh, owner, repo, run_id=run_id, branch=env("TRANSCRIPT_BRANCH") or DEFAULT_BRANCH_NAME)
+
+    initial_messages = history.build_initial_messages(issue, trusted_comments, store=transcript_store)
 
     default_branch = gh.get_default_branch(owner, repo)
     branch_name = f"agent/issue-{issue_number}"
@@ -126,6 +134,7 @@ def main():
         providers=providers,
         executor=executor,
         post_comment=post_comment,
+        transcript_store=transcript_store,
         max_rounds=max_iterations,
         max_seconds=time_budget,
     )

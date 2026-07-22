@@ -17,6 +17,7 @@ from .base import (
     ProviderResponse,
     ProviderUnavailableError,
     ToolCall,
+    parse_retry_after_seconds,
 )
 
 API_URL = "https://api.groq.com/openai/v1/chat/completions"
@@ -97,7 +98,10 @@ class GroqProvider(Provider):
         if resp.status_code == 413:
             raise ProviderRequestTooLargeError(f"Groq request too large: HTTP 413: {resp.text[:300]}")
         if resp.status_code == 429 or resp.status_code >= 500:
-            raise ProviderUnavailableError(f"Groq unavailable: HTTP {resp.status_code}: {resp.text[:300]}")
+            retry_after = parse_retry_after_seconds(resp.text)
+            raise ProviderUnavailableError(
+                f"Groq unavailable: HTTP {resp.status_code}: {resp.text[:300]}", retry_after_seconds=retry_after
+            )
         if not resp.ok:
             raise ProviderProtocolError(f"Groq error: HTTP {resp.status_code}: {resp.text[:500]}")
 

@@ -8,6 +8,7 @@ history is handed to the Gemini provider instead, unchanged.
 """
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -31,19 +32,26 @@ class ProviderResponse:
 
 
 class ProviderUnavailableError(Exception):
-    """Rate-limited, quota-exhausted, or transiently erroring — the
-    orchestrator should retry this same request on the *other* provider
-    rather than fail the whole run.
+    """Rate-limited, quota-exhausted, or transiently erroring. The
+    orchestrator retries this same provider with backoff first (see
+    orchestrator._try_provider); if retries are exhausted, it moves to the
+    next configured provider.
+
+    `retry_after_seconds`, when the provider's error told us exactly how
+    long to wait, is honored instead of a guessed exponential backoff.
     """
+
+    def __init__(self, message: str, retry_after_seconds: float | None = None):
+        super().__init__(message)
+        self.retry_after_seconds = retry_after_seconds
 
 
 class ProviderRequestTooLargeError(ProviderUnavailableError):
     """The request itself exceeded a per-request/per-minute token budget
-    (e.g. Groq's HTTP 413 tokens-per-minute limit). Unlike a generic outage,
-    retrying the *same* provider can succeed if the request is shrunk first
-    — so the orchestrator retries this provider with a smaller, more
-    compacted message history before giving up on it and moving to the next
-    configured provider.
+    (e.g. Groq's HTTP 413 tokens-per-minute limit). Waiting doesn't fix
+    this — shrinking the request does — so the orchestrator responds by
+    retrying this provider with a smaller, more compacted message history
+    rather than sleeping.
     """
 
 
@@ -53,6 +61,27 @@ class ProviderProtocolError(Exception):
     different provider, but distinct from ProviderUnavailableError so
     callers can decide.
     """
+
+
+_RETRY_AFTER_PATTERNS = [
+    re.compile(r"try again in\s*([\d.]+)\s*s", re.IGNORECASE),  # Groq
+    re.compile(r'"retryDelay"\s*:\s*"([\d.]+)s"', re.IGNORECASE),  # Gemini
+    re.compile(r"retry.{0,20}after\s*[:=]?\s*([\d.]+)", re.IGNORECASE),
+]
+
+
+def parse_retry_after_seconds(text: str) -> float | None:
+    """Best-effort extraction of a provider-suggested wait time from an
+    error body. Returns None if nothing recognizable is found, in which
+    case the caller should fall back to exponential backoff."""
+    for pattern in _RETRY_AFTER_PATTERNS:
+        match = pattern.search(text or "")
+        if match:
+            try:
+                return float(match.group(1))
+            except ValueError:
+                continue
+    return None
 
 
 class Provider:
