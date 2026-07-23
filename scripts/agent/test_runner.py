@@ -29,8 +29,24 @@ TAIL_CHARS = 4000
 # see AGENTS.md), so any functional test needs .htaccess-dev copied into
 # place first; env.php isn't strictly required (H\AppEnv::load no-ops if
 # missing) but is copied for parity with the documented local dev setup.
+#
+# php_version/php_extensions aren't used by run_tests() itself — they're
+# read by the workflow (see the "Determine required PHP version" step in
+# develop-issue.yml) to pin the runner's PHP *before* composer install ever
+# runs. This repo's composer.lock was resolved against PHP 8.0 specifically;
+# without pinning, `composer install` runs against whatever PHP happens to
+# be ubuntu-latest's current default (which drifts over time and is not
+# guaranteed to be 8.0), and fails with a "locked to version X and an
+# update was not requested" solver error — composer refusing to silently
+# deviate from the lock file for a platform it wasn't resolved against.
+# The fix is pinning the runtime to match, not `composer update`: the lock
+# file itself is fine (it works in this project's actual dev/prod
+# environments), so touching dependency versions would trade a fixed
+# problem for an unnecessary one.
 REPO_OVERRIDES: dict[str, dict] = {
     "pierreminiggio/cms": {
+        "php_version": "8.0",
+        "php_extensions": "mbstring, pdo, pdo_sqlite, sqlite3, gd, curl, zip",
         "setup_cmds": [
             ["cp", ".htaccess-dev", ".htaccess"],
             ["cp", "env-dev-base.php", "env.php"],

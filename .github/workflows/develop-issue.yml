@@ -33,6 +33,32 @@ jobs:
       - name: Checkout agent scripts
         uses: actions/checkout@v4
 
+      # Reads scripts/agent/test_runner.py's REPO_OVERRIDES directly (pure
+      # stdlib, no pip install needed yet) so the PHP version/extensions a
+      # target repo needs live in exactly one place, not duplicated here.
+      # Without this, composer install runs against whatever PHP happens to
+      # be ubuntu-latest's current default, which drifts over time and can
+      # silently stop matching a repo's committed composer.lock.
+      - name: Determine required PHP version
+        id: php_setup
+        run: |
+          python3 - <<'PYEOF' >> "$GITHUB_OUTPUT"
+          import sys
+          sys.path.insert(0, "scripts")
+          from agent.test_runner import REPO_OVERRIDES
+          override = REPO_OVERRIDES.get("${{ inputs.repo }}", {})
+          print(f"version={override.get('php_version', '')}")
+          print(f"extensions={override.get('php_extensions', '')}")
+          PYEOF
+
+      - name: Set up PHP
+        if: steps.php_setup.outputs.version != ''
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ steps.php_setup.outputs.version }}
+          extensions: ${{ steps.php_setup.outputs.extensions }}
+          tools: composer
+
       - name: Set up Python
         uses: actions/setup-python@v5
         with:

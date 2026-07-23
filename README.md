@@ -199,7 +199,19 @@ hardcoded override for repos with more particular setup, in
 **`pierreminiggio/cms`**, which needs `.htaccess-dev`/`env-dev-base.php`
 copied into place and runs both PHPUnit and Jest — add more entries the
 same way for any other repo whose test setup generic detection can't
-reasonably infer. The agent never gets to invent its own test command.
+reasonably infer. An override entry can also specify `php_version` /
+`php_extensions`: the workflow reads these (before installing anything,
+via a plain stdlib-only Python snippet — no pip install needed yet) and
+pins the runner to that PHP version with `shivammathur/setup-php` before
+`composer install` ever runs. This matters because a `composer.lock`
+resolved against one PHP version can fail to install cleanly on whatever
+PHP happens to be ubuntu-latest's current default otherwise (which drifts
+release to release) — composer refuses to silently deviate from the lock
+file rather than risk installing something different from what's actually
+committed. Pinning the runtime to match is the fix; regenerating the lock
+(`composer update`) is not, since that risks introducing unrelated
+dependency changes into a lock file that already works correctly in real
+dev/prod environments. The agent never gets to invent its own test command.
 
 For TDD/process conventions, the agent looks for `AGENTS.md`, `CLAUDE.md`,
 or `CONTRIBUTING.md` (first one found) at the target repo's root and folds
