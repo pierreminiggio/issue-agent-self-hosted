@@ -225,12 +225,26 @@ dependency changes into a lock file that already works correctly in real
 dev/prod environments. The agent never gets to invent its own test command.
 
 For TDD/process conventions, the agent looks for `AGENTS.md`, `CLAUDE.md`,
-or `CONTRIBUTING.md` (first one found) at the target repo's root and folds
-it into the system prompt. This is deliberately generic rather than
-hardcoding e.g. "use TDD for cms" in this project's own code — it works for
-whatever any repo documents about itself. On top of that, the system prompt
-always nudges toward writing/extending a test alongside the implementation
-where practical, regardless of whether the repo has its own docs saying so.
+or `CONTRIBUTING.md` (first one found) at the target repo's root and injects
+it as a message right after the issue body — not baked into the system
+prompt, which is resent in full every round for the whole run; as a regular
+message it's still guaranteed-visible from round 1, but ages into the same
+compaction as everything else once the conversation runs long (collapsed to
+a short pointer telling the model to `read_file` it again if it needs to
+recheck it). This is deliberately generic rather than hardcoding e.g. "use
+TDD for cms" in this project's own code — it works for whatever any repo
+documents about itself.
+
+On top of that, after a real run where the agent implemented a translation
+feature without ever checking how translations were structured elsewhere in
+the codebase (guessed nothing, wrote no locale files, and would have
+shipped an incomplete feature had the finish gate above not caught the "no
+changes made" case) — the system prompt now explicitly pushes the agent to
+find and follow existing precedent before writing anything: read at least
+one analogous existing feature first, and for anything user-facing
+text/translation specifically, find the actual translation mechanism in use
+and replicate its full structure (every locale/file it already covers, not
+just one) rather than guessing.
 
 ## Branch and PR reuse
 

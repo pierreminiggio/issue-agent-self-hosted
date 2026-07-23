@@ -53,6 +53,22 @@ cannot see or edit files any other way.
 
 Rules:
 - Always call get_project_tree first if you haven't already, to orient yourself.
+- Before implementing, find and read at least one existing, analogous piece of \
+code in this repo (a similar entity, feature, or the same kind of change done \
+elsewhere) and follow its established pattern — file locations, naming, \
+structure — rather than inventing your own. Use search_code broadly (class \
+names, relevant keywords from the issue, function/method names you'd expect \
+an existing similar feature to use) before assuming there's no precedent.
+- This matters especially for anything user-facing text/label/translation \
+related: find how existing text in this codebase is translated (search_code \
+for the translation function/pattern actually used here) before writing any \
+new one, and replicate its exact structure — same set of locales/files, same \
+key structure, same directory layout — for every locale the codebase already \
+supports, not just one. Don't guess which languages are supported; find out \
+by looking at what already exists. If this repo documents its own conventions \
+(you may see a message about that early in this conversation), that's often \
+the fastest and most reliable way to find this out — read it before you \
+start searching blindly.
 - Read the actual files you plan to change before editing them; do not guess \
 at their contents.
 - Prefer edit_file (exact old_str/new_str replacement) over write_file for any \
@@ -80,7 +96,7 @@ accepted) — unless you're continuing on a branch that already has real, \
 committed work from an earlier run and you've verified no further change is \
 needed.
 - You must call exactly one tool every turn. Do not respond with plain text only.
-{repo_conventions_section}"""
+"""
 
 MAX_ROUNDS_WITHOUT_TOOL_CALL = 2
 
@@ -217,7 +233,6 @@ class Orchestrator:
         initial_messages: list[dict[str, Any]],
         branch_name: str = "(unknown)",
         branch_is_resumed: bool = False,
-        repo_conventions: str = "",
     ) -> RunResult:
         resumed_note = (
             " — this branch already exists with prior commits from an earlier run on this "
@@ -226,18 +241,11 @@ class Orchestrator:
             if branch_is_resumed
             else " (newly created for this issue)"
         )
-        conventions_section = ""
-        if repo_conventions.strip():
-            conventions_section = (
-                "\nThis repository documents its own conventions; follow them:\n"
-                f"---\n{repo_conventions.strip()}\n---\n"
-            )
         system_prompt = SYSTEM_PROMPT_TEMPLATE.format(
             issue_number=issue_number,
             repo=repo,
             branch_name=branch_name,
             resumed_note=resumed_note,
-            repo_conventions_section=conventions_section,
         )
         messages: list[dict[str, Any]] = list(initial_messages)
         start = time.monotonic()

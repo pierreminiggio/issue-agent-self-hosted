@@ -128,16 +128,37 @@ def main():
     run_git(["config", "user.email", "issue-agent-bot@users.noreply.github.com"], cwd=WORKDIR)
 
     # A handful of common names for a repo's own documented conventions —
-    # first one found (if any) gets folded into the system prompt. This is
-    # how repo-specific process (e.g. cms's own TDD expectation) reaches the
-    # model, without hardcoding any particular repo's name in this script.
+    # first one found (if any) is injected as a message right after the
+    # issue body (see below), not baked into the system prompt: the system
+    # prompt is resent in full every round for the whole run, so a growing
+    # doc there is a permanent per-round token cost. As a regular message
+    # it's still guaranteed-visible from round 1, but ages into the same
+    # compaction as everything else in a long-running conversation.
     repo_conventions = ""
+    repo_conventions_name = None
     for candidate in ("AGENTS.md", "CLAUDE.md", "CONTRIBUTING.md"):
         candidate_path = WORKDIR / candidate
         if candidate_path.exists():
             print(f"Found repo conventions doc: {candidate}")
-            repo_conventions = candidate_path.read_text(encoding="utf-8", errors="ignore")[:8000]
+            repo_conventions = candidate_path.read_text(encoding="utf-8", errors="ignore")[:20000]
+            repo_conventions_name = candidate
             break
+
+    if repo_conventions.strip():
+        initial_messages.insert(
+            1,
+            {
+                "role": "user",
+                "compactable": True,
+                "name": repo_conventions_name,
+                "content": (
+                    f"This repository documents its own conventions in {repo_conventions_name}. "
+                    f"Read this before searching blindly — it often answers exactly the kind of "
+                    f"question ('which files/locations/patterns does this need') you'd otherwise "
+                    f"have to reconstruct from scratch:\n\n---\n{repo_conventions.strip()}\n---"
+                ),
+            },
+        )
 
     providers = build_providers()
     print(f"Configured providers (in failover order): {[p.name for p in providers]}")
@@ -159,7 +180,7 @@ def main():
     print("Starting orchestrator ...")
     result = orchestrator.run(
         target_repo, issue_number, initial_messages,
-        branch_name=branch_name, branch_is_resumed=branch_is_resumed, repo_conventions=repo_conventions,
+        branch_name=branch_name, branch_is_resumed=branch_is_resumed,
     )
     print(f"Orchestrator finished: status={result.status} rounds_used={result.rounds_used}")
 

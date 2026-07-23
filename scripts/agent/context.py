@@ -17,6 +17,12 @@ Strategy: keep full (capped-length) tool results for only the most recent
 `keep_full_rounds` rounds; older rounds' tool results collapse to a short
 placeholder. A "round" boundary is any assistant message — everything from
 one assistant message up to (not including) the next is that round.
+
+Messages tagged `"compactable": True` (e.g. an injected repo-conventions
+doc — see develop_issue.py) get the same treatment even though they aren't
+role="tool": otherwise a large one-time injection would cost full tokens
+every round for the entire run, same as if it were baked into the system
+prompt, defeating the point of not putting it there.
 """
 from __future__ import annotations
 
@@ -42,23 +48,34 @@ def compact_messages(
 
     compacted: list[dict[str, Any]] = []
     for i, msg in enumerate(messages):
-        if msg["role"] != "tool":
-            compacted.append(msg)
-            continue
-        content = msg["content"]
-        if i >= cutoff_index:
-            if len(content) > tool_result_chars:
-                content = content[:tool_result_chars] + f"... [truncated for context budget, {len(content)} chars total]"
-            compacted.append({**msg, "content": content})
-        else:
+        if msg["role"] == "tool":
+            content = msg["content"]
+            if i >= cutoff_index:
+                if len(content) > tool_result_chars:
+                    content = content[:tool_result_chars] + f"... [truncated for context budget, {len(content)} chars total]"
+                compacted.append({**msg, "content": content})
+            else:
+                compacted.append(
+                    {
+                        **msg,
+                        "content": (
+                            f"[Older result from {msg.get('name', 'a tool call')} omitted to save context — "
+                            "the full output is in this issue's comment history if you need it again; "
+                            "re-call the tool if so.]"
+                        ),
+                    }
+                )
+        elif msg.get("compactable") and i < cutoff_index:
+            label = msg.get("name", "earlier context")
             compacted.append(
                 {
                     **msg,
                     "content": (
-                        f"[Older result from {msg.get('name', 'a tool call')} omitted to save context — "
-                        "the full output is in this issue's comment history if you need it again; "
-                        "re-call the tool if so.]"
+                        f"[{label} was shown earlier in this conversation and has been collapsed to save "
+                        f"context — call read_file(\"{msg.get('name', '')}\") again if you need to re-check it.]"
                     ),
                 }
             )
+        else:
+            compacted.append(msg)
     return compacted
