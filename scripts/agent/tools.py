@@ -196,6 +196,7 @@ class ToolExecutor:
         repo_root: str,
         on_terminal: Callable[[str, dict], None] | None = None,
         target_repo: str | None = None,
+        initial_made_changes: bool = False,
     ):
         self.tools = repo_tools.RepoTools(repo_root)
         self.repo_root = repo_root
@@ -209,6 +210,16 @@ class ToolExecutor:
         # a test plan is detected at all — see _test_plan().
         self.last_tests_passed: bool | None = None
         self._test_plan_cache = "unset"  # sentinel distinct from a real None (no plan found)
+        # Whether any write_file/edit_file call has actually succeeded this
+        # run (or, for a resumed branch, real work already exists from an
+        # earlier run — see initial_made_changes). Tests trivially "pass"
+        # against an untouched checkout, so last_tests_passed alone doesn't
+        # prove any work was done — a model can call run_tests once before
+        # touching anything, then finish with a summary describing changes
+        # it never made. This catches that on a fresh branch, while still
+        # letting a resumed branch finish immediately if the model decides
+        # no further changes are actually needed this time.
+        self.made_changes = initial_made_changes
 
     def _test_plan(self):
         if self._test_plan_cache == "unset":
@@ -227,11 +238,17 @@ class ToolExecutor:
             if name == "search_code":
                 return self.tools.search_code(args["query"])
             if name == "write_file":
-                self.last_tests_passed = None  # file changed since the last test run
-                return self.tools.write_file(args["path"], args.get("content", ""))
+                result = self.tools.write_file(args["path"], args.get("content", ""))
+                if result.startswith("Created "):
+                    self.made_changes = True
+                    self.last_tests_passed = None  # file changed since the last test run
+                return result
             if name == "edit_file":
-                self.last_tests_passed = None  # file changed since the last test run
-                return self.tools.edit_file(args["path"], args["old_str"], args["new_str"])
+                result = self.tools.edit_file(args["path"], args["old_str"], args["new_str"])
+                if result.startswith("Edited "):
+                    self.made_changes = True
+                    self.last_tests_passed = None  # file changed since the last test run
+                return result
             if name == "run_tests":
                 plan = self._test_plan()
                 if plan is None:
@@ -246,6 +263,12 @@ class ToolExecutor:
                     self.on_terminal("ask_user", args)
                 return "Question recorded. Ending this run; a human will need to reply before the next run."
             if name == "finish":
+                if not self.made_changes:
+                    return (
+                        "ERROR: cannot finish — no file change has actually succeeded yet this run "
+                        "(no successful write_file or edit_file call). A summary describing work "
+                        "that wasn't actually done will not be accepted; make the real change first."
+                    )
                 plan = self._test_plan()
                 if plan is not None and not self.last_tests_passed:
                     return (

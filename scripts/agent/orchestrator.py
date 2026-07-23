@@ -73,7 +73,12 @@ reports ALL TEST SUITES PASSED.
 instead of guessing. This ends the run until a human replies, so use it only \
 when truly needed — inspect the code first.
 - When the feature/fix is complete (and tests pass, if any exist), call \
-finish with a clear summary of what you changed and why.
+finish with a clear summary of what you changed and why. finish is refused \
+if you haven't actually made any successful write_file/edit_file call this \
+run (a summary describing changes you didn't actually make will not be \
+accepted) — unless you're continuing on a branch that already has real, \
+committed work from an earlier run and you've verified no further change is \
+needed.
 - You must call exactly one tool every turn. Do not respond with plain text only.
 {repo_conventions_section}"""
 

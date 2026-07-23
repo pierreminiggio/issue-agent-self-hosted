@@ -142,7 +142,7 @@ def main():
     providers = build_providers()
     print(f"Configured providers (in failover order): {[p.name for p in providers]}")
 
-    executor = ToolExecutor(str(WORKDIR), target_repo=target_repo)
+    executor = ToolExecutor(str(WORKDIR), target_repo=target_repo, initial_made_changes=branch_is_resumed)
 
     def post_comment(body: str) -> None:
         gh.add_issue_comment(owner, repo, issue_number, body)

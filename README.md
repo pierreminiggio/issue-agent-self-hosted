@@ -191,6 +191,17 @@ and doesn't open a PR — it keeps iterating in the same run, using the
 failure output to fix the problem, until either it passes or the run
 genuinely runs out of iterations/time.
 
+There's a second, independent gate underneath that: `finish` is also
+refused if no `write_file`/`edit_file` call has actually succeeded this
+run. This exists because tests trivially "pass" against a completely
+untouched checkout — a model can call `run_tests` once before changing
+anything, then call `finish` with a plausible-sounding summary of work it
+never did, and the test gate alone wouldn't catch that (seen in practice:
+exactly this happened on a real run). A resumed branch (one with real,
+already-committed work from an earlier run — see Branch and PR reuse
+below) is exempt from this specific check, since the model may legitimately
+conclude no further change is needed after reviewing what's already there.
+
 Test detection is intentionally **not** left to the model — it's either
 generic file-based detection (composer.json/phpunit, package.json,
 pyproject.toml/pytest, go.mod, Cargo.toml, a Makefile `test:` target) or a
